@@ -1,3 +1,4 @@
 skyops
 build/
+.env*
 .vscode

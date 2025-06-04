@@ -4,11 +4,6 @@
   "heartbeat_interval": 30,
   "max_price_per_hour": 5.0,
   "auto_accept_jobs": false,
-  "provider_info": {
-    "name": "Test GPU Provider",
-    "contact": "test@example.com",
-    "auto_detect_location": true
-  },
   "gpu_whitelist": [],
   "logging": {
     "level": "DEBUG",

@@ -3,10 +3,10 @@ package main
 import (
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
@@ -15,29 +15,11 @@ import (
 
 // SystemMonitor handles system and GPU monitoring
 type SystemMonitor struct {
-	nvmlInitialized bool
 }
 
 // NewSystemMonitor creates a new system monitor
 func NewSystemMonitor() *SystemMonitor {
-	monitor := &SystemMonitor{}
-
-	// Try to initialize NVML for NVIDIA GPU monitoring
-	// This may fail on systems without NVIDIA drivers or GPUs
-	defer func() {
-		if r := recover(); r != nil {
-			// Handle panic from NVML initialization gracefully
-			monitor.nvmlInitialized = false
-		}
-	}()
-
-	if ret := nvml.Init(); ret == nvml.SUCCESS {
-		monitor.nvmlInitialized = true
-	} else {
-		monitor.nvmlInitialized = false
-	}
-
-	return monitor
+	return &SystemMonitor{}
 }
 
 // GetSystemInfo returns basic system information
@@ -119,127 +101,67 @@ func (m *SystemMonitor) GetDiskStats() DiskStats {
 
 // GetGPUStats returns GPU statistics
 func (m *SystemMonitor) GetGPUStats() []GPUInfo {
-	if !m.nvmlInitialized {
-		return m.getFallbackGPUStats()
-	}
-
-	deviceCount, ret := nvml.DeviceGetCount()
-
-	if ret != nvml.SUCCESS {
-		return m.getFallbackGPUStats()
-	}
-
-	gpus := make([]GPUInfo, 0, deviceCount)
-
-	for i := 0; i < deviceCount; i++ {
-		device, ret := nvml.DeviceGetHandleByIndex(i)
-
-		if ret != nvml.SUCCESS {
-			continue
-		}
-
-		gpu := m.getGPUInfo(device, i)
-		gpus = append(gpus, gpu)
-	}
-
-	return gpus
-}
-
-// getGPUInfo gets detailed information for a specific GPU
-func (m *SystemMonitor) getGPUInfo(device nvml.Device, index int) GPUInfo {
-	gpu := GPUInfo{
-		Index: index,
-	}
-
-	// Get GPU name
-	if name, ret := device.GetName(); ret == nvml.SUCCESS {
-		gpu.Name = name
-	}
-
-	// Get memory info
-	if memInfo, ret := device.GetMemoryInfo(); ret == nvml.SUCCESS {
-		gpu.MemoryTotal = memInfo.Total
-		gpu.MemoryUsed = memInfo.Used
-		gpu.MemoryFree = memInfo.Free
-		gpu.MemoryUsagePercent = float64(memInfo.Used) / float64(memInfo.Total) * 100
-	}
-
-	// Get utilization
-	if utilization, ret := device.GetUtilizationRates(); ret == nvml.SUCCESS {
-		gpu.GPUUtilization = utilization.Gpu
-		gpu.MemoryUtilization = utilization.Memory
-	}
-
-	// Get temperature
-	if temp, ret := device.GetTemperature(nvml.TEMPERATURE_GPU); ret == nvml.SUCCESS {
-		gpu.Temperature = temp
-	}
-
-	// Get power usage
-	if power, ret := device.GetPowerUsage(); ret == nvml.SUCCESS {
-		gpu.PowerUsage = float64(power) / 1000.0 // Convert mW to W
-	}
-
-	// Get fan speed
-	if fanSpeed, ret := device.GetFanSpeed(); ret == nvml.SUCCESS {
-		gpu.FanSpeed = fanSpeed
-	}
-
-	return gpu
-}
-
-// getFallbackGPUStats attempts to get GPU information using system commands
-// when NVML is not available (e.g., driver version mismatch)
-func (m *SystemMonitor) getFallbackGPUStats() []GPUInfo {
-	// Try to detect NVIDIA GPUs using lspci
+	// Try to detect NVIDIA GPUs using nvidia-smi
 	gpus := []GPUInfo{}
 
-	// Look for NVIDIA GPUs in lspci output
-	cmd := exec.Command("lspci")
+	cmd := exec.Command("nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,fan.speed", "--format=csv,noheader,nounits")
 	output, err := cmd.Output()
 	if err != nil {
 		return gpus
 	}
 
 	lines := strings.Split(string(output), "\n")
-	gpuIndex := 0
-
 	for _, line := range lines {
-		if strings.Contains(strings.ToLower(line), "nvidia") &&
-			strings.Contains(strings.ToLower(line), "vga") {
-
-			// Extract GPU name from lspci output
-			parts := strings.Split(line, ": ")
-			gpuName := "Unknown NVIDIA GPU"
-			if len(parts) > 1 {
-				// Remove revision info if present
-				name := parts[1]
-				if revIndex := strings.Index(name, " (rev "); revIndex != -1 {
-					name = name[:revIndex]
-				}
-				gpuName = name
-			}
-
-			gpu := GPUInfo{
-				Index:                gpuIndex,
-				Name:                 gpuName,
-				MemoryTotal:          0, // Can't get memory info without NVML
-				MemoryUsed:           0,
-				MemoryFree:           0,
-				MemoryUsagePercent:   0.0,
-				GPUUtilization:       0, // Can't get utilization without NVML
-				MemoryUtilization:    0,
-				Temperature:          0, // Can't get temperature without NVML
-				PowerUsage:           0.0,
-				FanSpeed:             0,
-			}
-
-			gpus = append(gpus, gpu)
-			gpuIndex++
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
+		fields := strings.Split(line, ",")
+		if len(fields) < 10 {
+			continue // Unexpected output
+		}
+		gpu := GPUInfo{}
+		// Parse fields safely
+		gpu.Index = parseInt(fields[0])
+		gpu.Name = strings.TrimSpace(fields[1])
+		gpu.MemoryTotal = parseUint64(fields[2]) * 1024 * 1024 // MB to bytes
+		gpu.MemoryUsed = parseUint64(fields[3]) * 1024 * 1024
+		gpu.MemoryFree = parseUint64(fields[4]) * 1024 * 1024
+		gpu.MemoryUsagePercent = percentFromFields(fields[3], fields[2])
+		gpu.GPUUtilization = parseUint32(fields[5])
+		gpu.MemoryUtilization = parseUint32(fields[6])
+		gpu.Temperature = parseUint32(fields[7])
+		gpu.PowerUsage = parseFloat64(fields[8])
+		gpu.FanSpeed = parseUint32(fields[9])
+		gpus = append(gpus, gpu)
 	}
-
 	return gpus
+}
+
+
+// Helper functions for parsing nvidia-smi output
+func parseInt(s string) int {
+	v, _ := strconv.Atoi(strings.TrimSpace(s))
+	return v
+}
+func parseUint64(s string) uint64 {
+	v, _ := strconv.ParseUint(strings.TrimSpace(s), 10, 64)
+	return v
+}
+func parseUint32(s string) uint32 {
+	v, _ := strconv.ParseUint(strings.TrimSpace(s), 10, 32)
+	return uint32(v)
+}
+func parseFloat64(s string) float64 {
+	v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return v
+}
+func percentFromFields(used, total string) float64 {
+	u := parseFloat64(used)
+	t := parseFloat64(total)
+	if t == 0 {
+		return 0
+	}
+	return (u / t) * 100
 }
 
 // GetCompleteStats returns complete system statistics
@@ -251,12 +173,5 @@ func (m *SystemMonitor) GetCompleteStats() AgentMonitoringData {
 		DiskStats:   m.GetDiskStats(),
 		GPUStats:    m.GetGPUStats(),
 		Timestamp:   time.Now().Unix(),
-	}
-}
-
-// Cleanup cleans up the monitor resources
-func (m *SystemMonitor) Cleanup() {
-	if m.nvmlInitialized {
-		nvml.Shutdown()
 	}
 }

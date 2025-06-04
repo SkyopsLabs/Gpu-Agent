@@ -5,7 +5,7 @@
 
 set -e
 
-PROJECT_NAME="skyops-agent"
+PROJECT_NAME="skyops"
 VERSION=${VERSION:-"1.0.0"}
 BUILD_DIR="build"
 PLATFORMS=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64" "windows/amd64")

@@ -21,7 +21,7 @@ import (
 // APIClient handles communication with the SkyOps backend
 type APIClient struct {
 	baseURL           string
-	agentID           string
+	wallet            string
 	logger            *logrus.Logger
 	httpClient        *http.Client
 	authToken         string
@@ -30,10 +30,9 @@ type APIClient struct {
 }
 
 // NewAPIClient creates a new API client
-func NewAPIClient(baseURL, agentID string) *APIClient {
+func NewAPIClient(baseURL string) *APIClient {
 	return &APIClient{
 		baseURL:          strings.TrimSuffix(baseURL, "/"),
-		agentID:          agentID,
 		logger:           logrus.New(),
 		expressServerURL: "https://app.skyopslabs.ai",
 		clientURL:        "https://app.skyopslabs.ai",
@@ -43,10 +42,6 @@ func NewAPIClient(baseURL, agentID string) *APIClient {
 	}
 }
 
-// UpdateAgentID updates the agent ID used by this client
-func (c *APIClient) UpdateAgentID(newAgentID string) {
-	c.agentID = newAgentID
-}
 
 // SetLogger sets the logger for the API client
 func (c *APIClient) SetLogger(logger *logrus.Logger) {
@@ -160,6 +155,7 @@ func (c *APIClient) Authenticate() error {
 		c.logger.Info("Found saved authentication token, validating...")
 		if c.ValidateToken() {
 			c.logger.Info("✅ Saved token is valid!")
+			
 			return nil
 		} else {
 			c.logger.Info("Saved token is invalid, need to re-authenticate")
@@ -270,15 +266,11 @@ func (c *APIClient) makeRequest(method, endpoint string, payload interface{}) (*
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", fmt.Sprintf("SkyOps-GPU-Agent/%s", c.agentID))
+	
 	req.Header.Set("Accept", "application/json")
 	
 	if c.authToken != "" {
 		req.Header.Set("x-auth-token", c.authToken)
-	}
-	
-	if c.agentID != "" {
-		req.Header.Set("X-Agent-ID", c.agentID)
 	}
 
 	c.logger.WithFields(logrus.Fields{
@@ -326,6 +318,45 @@ func (c *APIClient) RegisterNode(nodeInfo map[string]interface{}) (string, error
 
 	c.logger.WithField("agent_id", actualAgentID).Info("Successfully registered node with SkyOps network")
 	return actualAgentID, nil
+}
+
+func (c *APIClient) CheckAgentExists() (bool, error) {
+	// First ensure we have the wallet address
+	if c.wallet == "" {
+		userInfo, err := c.GetUserInfo()
+		if err != nil {
+			return false, fmt.Errorf("failed to get user info: %v", err)
+		}
+		
+		walletAddress, ok := userInfo["wallet"].(string)
+		if !ok {
+			return false, fmt.Errorf("wallet not found in user info")
+		}
+		
+		c.wallet = walletAddress
+	}
+	
+	// Use the wallet address as the agent_id to check existence
+	// This works because the backend /agents/{agent_id} endpoint can find by wallet_address
+	resp, err := c.makeRequest("GET", fmt.Sprintf("/api/v1/agents/%s", c.wallet), nil)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	
+	// If we get a 200 OK, the agent exists
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+	
+	// If we get a 404, the agent doesn't exist
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	
+	// For other status codes, consider it an error
+	body, _ := io.ReadAll(resp.Body)
+	return false, fmt.Errorf("failed to check agent existence with status %d: %s", resp.StatusCode, string(body))
 }
 
 // SendHeartbeat sends heartbeat with current system status
@@ -455,4 +486,52 @@ func (c *APIClient) UpdateJobStatus(jobID, status string, result map[string]inte
 		"status": status,
 	}).Info("Job status updated successfully")
 	return nil
+}
+
+// GetUserInfo gets the current user information including wallet address
+func (c *APIClient) GetUserInfo() (map[string]interface{}, error) {
+	req, err := http.NewRequest("GET", c.expressServerURL+"/api/users", nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	req.Header.Set("x-auth-token", c.authToken)
+	
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to get user info with status %d: %s", resp.StatusCode, string(body))
+	}
+	
+	var userInfo map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse user info response: %v", err)
+	}
+	// fmt.Printf("users: %v\n", userInfo)
+	return userInfo, nil
+}
+
+// SetWalletAddress sets the wallet address for this client
+func (c *APIClient) SetWalletAddress(walletAddress string) {
+	c.wallet = walletAddress
+}
+
+// GetWalletAddress returns the current wallet address
+func (c *APIClient) GetWalletAddress() string {
+	return c.wallet
+}
+
+// GetAuthToken returns the current authentication token
+func (c *APIClient) GetAuthToken() string {
+	return c.authToken
+}
+
+// SetAuthToken sets the authentication token
+func (c *APIClient) SetAuthToken(token string) {
+	c.authToken = token
 }

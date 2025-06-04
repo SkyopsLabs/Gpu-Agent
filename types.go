@@ -139,7 +139,7 @@ type AgentRegisterRequest struct {
 	Hostname        string           `json:"hostname"`
 	Location        string           `json:"location"`
 	SystemInfo      SystemInfo       `json:"system_info"`
-	GPUCapabilities GPUCapabilities  `json:"gpu_capabilities"`
+	// GPUCapabilities GPUCapabilities  `json:"gpu_capabilities"`
 	AutoAcceptJobs  *bool            `json:"auto_accept_jobs,omitempty"`
 }
 
@@ -153,7 +153,6 @@ type AgentRegisterResponse struct {
 
 // AgentHeartbeatRequest represents the heartbeat request (simplified flat structure)
 type AgentHeartbeatRequest struct {
-	AgentID      string  `json:"agent_id"`
 	Timestamp    int64   `json:"timestamp"`
 	CPUCount     int     `json:"cpu_count"`
 	RAMTotal     float64 `json:"ram_total"`

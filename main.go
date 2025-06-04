@@ -2,20 +2,34 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/sirupsen/logrus"
 )
+
+//go:embed .env
+var embeddedEnvFile embed.FS
+
+// Global API client instance
+var globalAPIClient *APIClient
+
+// Global agent instance
+var globalAgent *Agent
+
+// Global config instance
+var globalConfig *Config
 
 // LoggingConfig represents logging configuration
 type LoggingConfig struct {
@@ -26,6 +40,7 @@ type LoggingConfig struct {
 // Config represents the agent configuration
 type Config struct {
 	AgentID            string                 `json:"agent_id"`
+	WalletAddress      string                 `json:"wallet_address"`
 	BackendURL         string                 `json:"backend_url"`
 	APIKey             string                 `json:"api_key"`
 	HeartbeatInterval  int                    `json:"heartbeat_interval"`
@@ -54,13 +69,12 @@ type Agent struct {
 	running           bool
 	ctx               context.Context
 	cancel            context.CancelFunc
-	lastJobCheckLog   time.Time
 	lastHeartbeatLog  time.Time
 }
 
 // NewAgent creates a new SkyOps agent instance
-func NewAgent(configPath string) (*Agent, error) {
-	config, err := loadConfig(configPath)
+func NewAgent() (*Agent, error) {
+	config, err := getOrLoadConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %v", err)
 	}
@@ -69,8 +83,21 @@ func NewAgent(configPath string) (*Agent, error) {
 	monitor := NewSystemMonitor()
 	
 	// Create API client with the new interface
-	apiClient := NewAPIClient(config.BackendURL, config.AgentID)
+	apiClient := NewAPIClient(config.BackendURL)
 	apiClient.SetLogger(logger)
+	
+	// Copy authentication token from global client if available
+	if globalAPIClient != nil && globalAPIClient.GetAuthToken() != "" {
+		apiClient.SetAuthToken(globalAPIClient.GetAuthToken())
+	} else {
+		// Try to load saved token
+		apiClient.LoadSavedToken()
+	}
+	
+	// Set wallet address if available in config
+	if config.WalletAddress != "" {
+		apiClient.SetWalletAddress(config.WalletAddress)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -98,43 +125,73 @@ func NewAgent(configPath string) (*Agent, error) {
 	return agent, nil
 }
 
-// loadConfig loads configuration from JSON file
-func loadConfig(configPath string) (*Config, error) {
-	if configPath == "" {
-		homeDir, _ := os.UserHomeDir()
-		configPath = filepath.Join(homeDir, ".skyops", "config.json")
+// loadConfig loads configuration from environment variables
+func loadConfig() (*Config, error) {
+	// First try to load embedded .env file
+	if envData, err := embeddedEnvFile.ReadFile(".env"); err == nil {
+		envMap, err := godotenv.Unmarshal(string(envData))
+		if err == nil {
+			// Set environment variables from embedded file if not already set
+			for key, value := range envMap {
+				if os.Getenv(key) == "" {
+					os.Setenv(key, value)
+				}
+			}
+		}
+	}
+	
+	// Also try to load local .env file if it exists (for development)
+	_ = godotenv.Load()
+
+	config := &Config{}
+
+	// Read from environment variables
+	config.BackendURL = os.Getenv("BACKEND_URL")
+	if config.BackendURL == "" {
+		return nil, fmt.Errorf("BACKEND_URL environment variable is required")
+	}
+	
+	config.APIKey = os.Getenv("API_KEY")
+
+	if v := os.Getenv("HEARTBEAT_INTERVAL"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			config.HeartbeatInterval = i
+		}
+	}
+	if v := os.Getenv("MAX_PRICE_PER_HOUR"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			config.MaxPricePerHour = f
+		}
+	}
+	if v := os.Getenv("AUTO_ACCEPT_JOBS"); v != "" {
+		config.AutoAcceptJobs = (v == "true" || v == "1")
+	}
+	if v := os.Getenv("GPU_WHITELIST"); v != "" {
+		// Comma-separated list
+		config.GPUWhitelist = strings.Split(v, ",")
 	}
 
-	   data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %v", err)
-	}
-
-	var config Config
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config JSON: %v", err)
-	}
-
-	// Set defaults
-	if config.HeartbeatInterval == 0 {
-		config.HeartbeatInterval = 30
-	}
+	config.Logging.Level = os.Getenv("LOG_LEVEL")
 	if config.Logging.Level == "" {
 		config.Logging.Level = "info"
 	}
+	config.Logging.File = os.Getenv("LOG_FILE")
 	if config.Logging.File == "" {
 		config.Logging.File = "agent.log"
 	}
-	
+
 	// Generate dynamic agent ID if not set or if it's a placeholder
-	if config.AgentID == "" || config.AgentID == "my-gpu-node" {
-		// We'll let the server generate a unique agent ID based on hostname
-		// For now, set a temporary ID that will be replaced by server response
+	if config.AgentID == "" {
 		config.AgentID = generateDynamicAgentID()
-		fmt.Printf("🆔 Will request unique agent ID based on hostname: %s\n", config.AgentID)
+		// fmt.Printf("🆔 %s\n", config.AgentID)
 	}
 
-	return &config, nil
+	// Set default heartbeat interval if not set
+	if config.HeartbeatInterval == 0 {
+		config.HeartbeatInterval = 30
+	}
+
+	return config, nil
 }
 
 // setupLogging configures the logger
@@ -240,106 +297,48 @@ func (a *Agent) authenticate() error {
 
 // registerNode registers this node with the SkyOps network
 func (a *Agent) registerNode() error {
-	a.logger.WithField("agent_id", a.config.AgentID).Info("Registering node with SkyOps network...")
-
 	// Get system information for registration
 	systemInfo := a.monitor.GetSystemInfo()
 	gpuStats := a.monitor.GetGPUStats()
 
-	// Auto-detect location if requested
+	// Always auto-detect location
 	location := "Unknown"
-	if autoDetect, ok := a.config.ProviderInfo["auto_detect_location"].(bool); ok && autoDetect {
-		if detectedLocation, err := a.detectLocation(); err == nil {
-			location = detectedLocation
-			a.logger.WithField("location", location).Info("Auto-detected location")
-		} else {
-			a.logger.WithError(err).Warning("Could not auto-detect location")
-		}
-	} else if configLocation, ok := a.config.ProviderInfo["location"].(string); ok {
-		location = configLocation
+	if detectedLocation, err := a.detectLocation(); err == nil {
+		location = detectedLocation
+		a.logger.WithField("location", location).Info("Auto-detected location")
+	} else {
+		a.logger.WithError(err).Warning("Could not auto-detect location")
 	}
 
-	// Convert GPU stats to capabilities summary
-	gpuCapabilities := GPUCapabilities{
-		GPUCount: len(gpuStats),
-		AllGPUs:  make([]GPUSummary, 0, len(gpuStats)),
-	}
-	
-	if len(gpuStats) > 0 {
-		firstGPU := gpuStats[0]
-		gpuCapabilities.PrimaryGPUName = firstGPU.Name
-		gpuCapabilities.TotalMemory = firstGPU.MemoryTotal
-		gpuCapabilities.FreeMemory = firstGPU.MemoryFree
-		
-		if firstGPU.GPUUtilization > 0 {
-			gpuCapabilities.GPUUtilization = &firstGPU.GPUUtilization
-		}
-		if firstGPU.MemoryUtilization > 0 {
-			gpuCapabilities.MemoryUtilization = &firstGPU.MemoryUtilization
-		}
-		if firstGPU.Temperature > 0 {
-			gpuCapabilities.Temperature = &firstGPU.Temperature
-		}
-		if firstGPU.PowerUsage > 0 {
-			gpuCapabilities.PowerUsage = &firstGPU.PowerUsage
-		}
-		
-		// Add summary of all GPUs
-		for _, gpu := range gpuStats {
-			summary := GPUSummary{
-				Index:       gpu.Index,
-				Name:        gpu.Name,
-				MemoryTotal: gpu.MemoryTotal,
-			}
-			gpuCapabilities.AllGPUs = append(gpuCapabilities.AllGPUs, summary)
-		}
+	// Log to the screen if no GPU found
+	if len(gpuStats) == 0 {
+		fmt.Println("⚠️  No GPU found on this node")
+		a.logger.Warning("No GPU found on this node")
 	}
 
 	// Create registration request using unified types
 	regRequest := AgentRegisterRequest{
-		Hostname:        systemInfo.Hostname,
-		Location:        location,
-		SystemInfo:      systemInfo,
-		GPUCapabilities: gpuCapabilities,
-		AutoAcceptJobs:  &a.config.AutoAcceptJobs,
-	}
-	
-	if a.config.AgentID != "" {
-		regRequest.AgentID = &a.config.AgentID
+		Hostname:       systemInfo.Hostname,
+		Location:       location,
+		SystemInfo:     systemInfo,
+		AutoAcceptJobs: &a.config.AutoAcceptJobs,
 	}
 
 	// Convert to map for the legacy API client
 	nodeInfo := map[string]interface{}{
-		"agent_id":          regRequest.AgentID,
-		"hostname":          regRequest.Hostname,
-		"location":          regRequest.Location,
-		"gpu_capabilities":  regRequest.GPUCapabilities,
-		"auto_accept_jobs":  regRequest.AutoAcceptJobs,
-		"system_info":       regRequest.SystemInfo,
+		"hostname":         regRequest.Hostname,
+		"location":         regRequest.Location,
+		"auto_accept_jobs": regRequest.AutoAcceptJobs,
+		"system_info":      regRequest.SystemInfo,
 	}
 
 	// Register and get the actual agent ID assigned by server
-	actualAgentID, err := a.apiClient.RegisterNode(nodeInfo)
+	_, err := a.apiClient.RegisterNode(nodeInfo)
 	if err != nil {
 		return err
 	}
 
-	// Update our config with the actual agent ID
-	if actualAgentID != a.config.AgentID {
-		a.logger.WithFields(logrus.Fields{
-			"old_agent_id": a.config.AgentID,
-			"new_agent_id": actualAgentID,
-		}).Info("Agent ID updated by server")
-		
-		a.config.AgentID = actualAgentID
-		a.apiClient.UpdateAgentID(actualAgentID)
-		
-		// Save the updated config
-		if err := a.saveConfig(); err != nil {
-			a.logger.WithError(err).Warning("Failed to save updated config with new agent ID")
-		}
-	}
-
+	
 	return nil
 }
 
@@ -460,11 +459,8 @@ func (a *Agent) checkForJobs() {
 	if len(jobs) == 0 {
 		// Only log job checking success every 5 minutes to avoid spam
 		now := time.Now()
-		if a.lastJobCheckLog.IsZero() || now.Sub(a.lastJobCheckLog) >= 5*time.Minute {
-			a.logger.Debug("Job check completed - no pending jobs")
-			fmt.Printf("📋 [%s] No pending jobs - monitoring...\n", now.Format("15:04:05"))
-			a.lastJobCheckLog = now
-		}
+		a.logger.Debug("Job check completed - no pending jobs")
+		fmt.Printf("📋 [%s] No pending jobs - monitoring...\n", now.Format("15:04:05"))
 		return
 	}
 
@@ -572,28 +568,6 @@ func (a *Agent) updateConfig(newConfig map[string]interface{}) {
 	a.logger.Info("Configuration updated successfully")
 }
 
-// cleanup performs cleanup before shutdown
-func (a *Agent) cleanup() {
-	a.logger.Info("Cleaning up agent resources...")
-	
-	// Send final status update with simplified flat schema
-	finalHeartbeat := map[string]interface{}{
-		"agent_id":       a.config.AgentID,
-		"timestamp":      time.Now().Unix(),
-		"cpu_count":      0,
-		"ram_total":      0.0,
-		"ram_free":       0.0,
-		"disk_total":     0,
-		"disk_free":      0,
-		"gpu_name":       "",
-		"gpu_ram_total":  0.0,
-		"gpu_ram_free":   0.0,
-	}
-	a.apiClient.SendHeartbeat(finalHeartbeat)
-	
-	a.logger.Info("Agent cleanup completed")
-}
-
 // generateDynamicAgentID generates an agent ID based on hostname
 func generateDynamicAgentID() string {
 	hostname, err := os.Hostname()
@@ -607,11 +581,80 @@ func generateDynamicAgentID() string {
 	return fmt.Sprintf("skyops_node_%s", hostname)
 }
 
+// initializeGlobalAPIClient initializes the global API client
+func initializeGlobalAPIClient() error {
+	config, err := getOrLoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %v", err)
+	}
+
+	globalAPIClient = NewAPIClient(config.BackendURL)
+	// Use a minimal logger for API operations  
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	globalAPIClient.SetLogger(logger)
+
+	// If authenticated, get and set wallet address
+	if globalAPIClient.ValidateToken() {
+		if userInfo, err := globalAPIClient.GetUserInfo(); err == nil {
+			if walletAddress, ok := userInfo["wallet"].(string); ok {
+				globalAPIClient.SetWalletAddress(walletAddress)
+			}
+		}
+	}
+
+	return nil
+}
+
+// getOrCreateAgent gets the global agent instance or creates it if it doesn't exist
+func getOrCreateAgent(verbose bool) (*Agent, error) {
+	if globalAgent != nil {
+		return globalAgent, nil
+	}
+	
+	agent, err := NewAgent()
+	if err != nil {
+		return nil, err
+	}
+	
+	// Disable verbose logging unless requested
+	if !verbose {
+		agent.logger.SetOutput(io.Discard)
+		agent.apiClient.SetLogger(logrus.New())
+		agent.apiClient.logger.SetOutput(io.Discard)
+	}
+	
+	globalAgent = agent
+	return globalAgent, nil
+}
+
+// getOrLoadConfig gets the global config instance or loads it if it doesn't exist
+func getOrLoadConfig() (*Config, error) {
+	if globalConfig != nil {
+		return globalConfig, nil
+	}
+	
+	config, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	
+	globalConfig = config
+	return globalConfig, nil
+}
+
+// Note: No cleanup function needed as it would reset agent stats in database
+
 func main() {
+	// Initialize global API client
+	if err := initializeGlobalAPIClient(); err != nil {
+		// For commands that don't need API access, we can continue
+		// Commands that need API will handle the error gracefully
+	}
+
 	if len(os.Args) < 2 {
-		// Default behavior - start agent
-		handleStartCommand([]string{"start"})
-		return
+		showHelp()
+		os.Exit(0)
 	}
 
 	command := os.Args[1]
@@ -619,13 +662,15 @@ func main() {
 
 	switch command {
 	case "login":
-		handleLoginCommand(args)
+		handleLoginCommand()
 	case "register":
 		handleRegisterCommand(args)
 	case "start":
 		handleStartCommand(args)
 	case "status":
-		handleStatusCommand(args)
+		handleStatusCommand()
+	case "stats":
+		handleStatsCommand(args)
 	case "stop":
 		handleStopCommand(args)
 	case "ping":
@@ -642,7 +687,7 @@ func main() {
 }
 
 func showHelp() {
-	fmt.Println(`SkyOps GPU Provider Agent - Join the decentralized GPU network
+	fmt.Println(`SkyOps GPU Provider - Join the decentralized GPU network
 
 Usage:
   skyops [command] [flags]
@@ -652,148 +697,195 @@ Available Commands:
   register    Register this node with the SkyOps network
   start       Start the agent daemon
   status      Check agent status
+  stats       Show detailed agent statistics and information
   stop        Stop the agent daemon
   ping        Test heartbeat connection to SkyOps network
   version     Show version information
   help        Show this help message
 
 Examples:
-  skyops login        # Authenticate with the SkyOps network
-  skyops register     # Register this node (must be authenticated)
-  skyops start        # Start the agent daemon
-  skyops status       # Check agent status
-  skyops stop         # Stop the agent daemon
-  skyops ping         # Test heartbeat connection
+  skyops login           # Authenticate with the SkyOps network
+  skyops register        # Register this node (must be authenticated)
+  skyops start           # Start the agent in foreground
+  skyops start --daemon  # Start the agent as background daemon
+  skyops status          # Check agent status
+  skyops stop            # Stop the agent daemon/process
+  skyops ping            # Test heartbeat connection
 
 Flags:
-  --config string     Path to configuration file (default: ~/.skyops/config.json)
   --daemon           Run as background daemon (for start command)
-  --help             Show help information`)
+  --verbose, -v      Show detailed output (for ping command)
+  --help             Show help information
+
+Daemon Mode:
+  Use 'skyops start --daemon' to run the agent in the background.
+  The daemon will continue running even after you close the terminal.
+  Use 'skyops stop' to stop the daemon process.
+  Use 'skyops status' to check if the daemon is running.`)
 }
 
-func handleLoginCommand(args []string) {
-		
-	homeDir, _ := os.UserHomeDir()
-	configPath := filepath.Join(homeDir, ".skyops", "config.json")
-	for i, arg := range args {
-		if arg == "--config" && i+1 < len(args) {
-			configPath = args[i+1]
+func handleLoginCommand() {
+	// Ensure global API client is initialized with current config
+	// printf("client: %v\n", globalAPIClient)
+	if globalAPIClient == nil {
+		if err := initializeGlobalAPIClient(); err != nil {
+			fmt.Printf("❌ Failed to initialize API client: %v\n", err)
+			os.Exit(1)
 		}
 	}
 
-	agent, err := NewAgent(configPath)
-	if err != nil {
-		fmt.Printf("❌ Failed to initialize agent: %v\n", err)
-		os.Exit(1)
+	// If wallet address is missing, force authentication
+	if globalAPIClient.wallet == "" {
+		fmt.Println("🔐 Wallet address not found, starting authentication flow...")
+		if err := globalAPIClient.Authenticate(); err != nil {
+			fmt.Println("❌ Authentication failed")
+			os.Exit(1)
+		}
+		// Get and store wallet address after successful authentication
+		if userInfo, err := globalAPIClient.GetUserInfo(); err == nil {
+			if walletAddress, ok := userInfo["wallet"].(string); ok {
+				globalAPIClient.SetWalletAddress(walletAddress)
+			}
+		}
+		fmt.Println("✅ Authentication successful!")
+		return
 	}
-	defer agent.cleanup()
 
 	// Check if already logged in
-	if agent.apiClient.ValidateToken() {
+	if globalAPIClient.ValidateToken() {
 		fmt.Println("✅ Already logged in!")
 		return
 	}
 
 	fmt.Println("🔐 Starting SkyOps authentication flow...")
-	if err := agent.apiClient.Authenticate(); err != nil {
+	if err := globalAPIClient.Authenticate(); err != nil {
 		fmt.Println("❌ Authentication failed")
 		os.Exit(1)
 	}
+	
+	// Get and store wallet address after successful authentication
+	if userInfo, err := globalAPIClient.GetUserInfo(); err == nil {
+		if walletAddress, ok := userInfo["wallet"].(string); ok {
+			globalAPIClient.SetWalletAddress(walletAddress)
+		}
+	}
+	
 	fmt.Println("✅ Authentication successful!")
 }
 
 func handleRegisterCommand(args []string) {
-	homeDir, _ := os.UserHomeDir()
-	var configPath string = filepath.Join(homeDir, ".skyops", "config.json")
-	// Parse flags
-	for i, arg := range args {
-		if arg == "--config" && i+1 < len(args) {
-			configPath = args[i+1]
+	// Parse flags - keeping only relevant ones
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			fmt.Println("Register this node with the SkyOps network")
+			fmt.Println("Usage: skyops register")
+			return
 		}
 	}
 
 	fmt.Println("🚀 SkyOps GPU Node Registration")
 	fmt.Println(strings.Repeat("=", 50))
 
-	// Check if config file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		fmt.Printf("❌ Configuration file '%s' not found\n", configPath)
-		homeDir, _ := os.UserHomeDir()
-		defaultConfig := filepath.Join(homeDir, ".skyops", "config.json")
-		fmt.Printf("💡 Create the config file or specify a different one with --config\n")
-		fmt.Printf("📄 Default location: %s\n", defaultConfig)
+	// Ensure global API client is initialized
+	if globalAPIClient == nil {
+		if err := initializeGlobalAPIClient(); err != nil {
+			fmt.Printf("❌ Failed to initialize API client: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Check for wallet address before proceeding
+	if globalAPIClient.wallet == "" {
+		fmt.Println("❌ No wallet address found. Please run 'skyops login' to authenticate before registering.")
 		os.Exit(1)
 	}
 
-	agent, err := NewAgent(configPath)
-	if err != nil {
-		fmt.Printf("❌ Failed to initialize agent: %v\n", err)
-		os.Exit(1)
-	}
-	defer agent.cleanup()
-
-	// Disable verbose logging for cleaner output
-	agent.logger.SetOutput(io.Discard)
-	agent.apiClient.SetLogger(logrus.New())
-	agent.apiClient.logger.SetOutput(io.Discard)
-
-	// Only check authentication, do not authenticate here
-	if !agent.apiClient.ValidateToken() {
+	// Check if agent already exists
+	if globalAPIClient.ValidateToken() {
+		agentExists, err := globalAPIClient.CheckAgentExists()
+		if err != nil {
+			fmt.Printf("❌ Failed to check agent status: %v\n", err)
+			os.Exit(1)
+		}
+		
+		if agentExists {
+			fmt.Println("✅ agent_id already on the network")
+			return
+		}
+	} else {
 		fmt.Println("❌ Not authenticated. Please run 'skyops login' to authenticate before registering.")
 		os.Exit(1)
 	}
 
-	// Step 1: Registration
-	initialAgentID := agent.config.AgentID
-	fmt.Printf("📝 Registering node with SkyOps network (Initial Agent ID: %s)...\n", initialAgentID)
+	// For actual registration, we still need the full agent (for system monitoring)
+	agent, err := getOrCreateAgent(false)
+	if err != nil {
+		fmt.Printf("❌ Failed to initialize agent: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Proceed with registration
+	fmt.Printf("📝 Registering node with SkyOps network...\n")
 	if err := agent.registerNode(); err != nil {
 		fmt.Printf("❌ Node registration failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Show final agent ID (may have been updated by server)
-	if agent.config.AgentID != initialAgentID {
-		fmt.Printf("✅ Node registration completed successfully with Agent ID: %s\n", agent.config.AgentID)
-	} else {
-		fmt.Println("✅ Node registration completed successfully!")
-	}
+	fmt.Println("✅ Node registration completed successfully!")
 	fmt.Println("💡 You can now start the agent with: skyops start")
 }
 
 func handleStartCommand(args []string) {
-	homeDir, _ := os.UserHomeDir()
-	var configPath string = filepath.Join(homeDir, ".skyops", "config.json")
 	var daemon bool = false
+	var noDaemon bool = false
 
 	// Parse flags
-	for i, arg := range args {
-		if arg == "--config" && i+1 < len(args) {
-			configPath = args[i+1]
-		} else if arg == "--daemon" {
+	for _, arg := range args {
+		if arg == "--daemon" {
 			daemon = true
+		} else if arg == "--no-daemon" {
+			noDaemon = true
+		} else if arg == "--help" || arg == "-h" {
+			fmt.Println("Start the SkyOps GPU agent")
+			fmt.Println("Usage: skyops start [--daemon|--no-daemon]")
+			fmt.Println("  --daemon      Run as background daemon")
+			fmt.Println("  --no-daemon   Run in foreground (used internally)")
+			return
 		}
 	}
 
-	fmt.Println("🚀 Starting SkyOps GPU Agent...")
+	// If daemon mode is requested and this is not the no-daemon subprocess
+	if daemon && !noDaemon {
+		fmt.Println("� Starting daemon...")
+		if err := startDaemon(); err != nil {
+			fmt.Printf("❌ Failed to start daemon: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
-	// Check if config file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		fmt.Printf("❌ Configuration file '%s' not found\n", configPath)
-		fmt.Println("Please run 'skyops register' first to set up your node")
+	// If running as daemon subprocess, redirect output
+	if noDaemon {
+		if err := redirectOutput(); err != nil {
+			fmt.Printf("❌ Failed to redirect output: %v\n", err)
+			// Continue anyway, this is not critical
+		}
+	}
+
+	fmt.Println("�🚀 Starting SkyOps GPU Agent...")
+
+	// Check if required environment variables are set
+	if os.Getenv("BACKEND_URL") == "" {
+		fmt.Println("❌ BACKEND_URL environment variable not set")
+		fmt.Println("Please set required environment variables before starting the agent")
 		os.Exit(1)
 	}
 
-	agent, err := NewAgent(configPath)
+	agent, err := getOrCreateAgent(false)
 	if err != nil {
 		fmt.Printf("❌ Failed to initialize agent: %v\n", err)
 		os.Exit(1)
 	}
-	defer agent.cleanup()
-
-	// Disable verbose logging for cleaner output
-	agent.logger.SetOutput(io.Discard)
-	agent.apiClient.SetLogger(logrus.New())
-	agent.apiClient.logger.SetOutput(io.Discard)
 
 	// Check authentication
 	fmt.Println("🔐 Checking authentication...")
@@ -807,11 +899,6 @@ func handleStartCommand(args []string) {
 		fmt.Println("✅ Using saved authentication token")
 	}
 
-	if daemon {
-		fmt.Println("🔧 Starting as daemon...")
-		// TODO: Implement proper daemon mode
-	}
-
 	fmt.Println("✅ Agent started successfully")
 	fmt.Println("📊 Sending heartbeats to network...")
 	fmt.Println("Press Ctrl+C to stop")
@@ -823,65 +910,54 @@ func handleStartCommand(args []string) {
 	}
 }
 
-// isAgentRunning checks if the skyops agent is currently running
-func isAgentRunning() bool {
-	// Simple process check - look for skyops processes
-	cmd := exec.Command("pgrep", "-f", "skyops.*start")
-	err := cmd.Run()
-	return err == nil
-}
-
-func handleStatusCommand(args []string) {
+// isAgentRunning checks if the skyops agent is currently running (started with 'skyops start')
+func handleStatusCommand() {
 	fmt.Println("📊 SkyOps Agent Status")
 	fmt.Println(strings.Repeat("=", 30))
 
-	// Check if config exists
-	homeDir, _ := os.UserHomeDir()
-	defaultConfig := filepath.Join(homeDir, ".skyops", "config.json")
-	if _, err := os.Stat(defaultConfig); os.IsNotExist(err) {
-		fmt.Println("❌ Status: Not configured")
+	config, err := getOrLoadConfig()
+	if err != nil {
+		fmt.Println("❌ Status: Not configured - missing environment variables")
+		fmt.Println("💡 Set BACKEND_URL and other environment variables")
 		fmt.Println("💡 Run 'skyops register' to set up your node")
 		return
 	}
 
-	// Load config to get agent info
-	   configData, err := os.ReadFile(defaultConfig)
-	if err != nil {
-		fmt.Println("❌ Status: Configuration file corrupted")
-		return
+	// Ensure global API client is initialized
+	if globalAPIClient == nil {
+		if err := initializeGlobalAPIClient(); err != nil {
+			fmt.Println("❌ Status: Failed to initialize API client")
+			return
+		}
 	}
-
-	var config Config
-	if err := json.Unmarshal(configData, &config); err != nil {
-		fmt.Println("❌ Status: Configuration file corrupted")
-		return
-	}
-
-	// Create temporary client to check auth status
-	client := NewAPIClient("http://localhost:8000", config.AgentID)
 	
-	// Check if agent is currently running
+	// Check if agent is currently running (daemon or regular process)
+	daemonRunning := isDaemonRunning()
 	agentRunning := isAgentRunning()
 	
-	if client.ValidateToken() {
+	if globalAPIClient.ValidateToken() {
 		fmt.Printf("✅ Status: Configured and Authenticated (Agent ID: %s)\n", config.AgentID)
 		fmt.Println("🔑 Authentication: Valid")
 		
-		if agentRunning {
+		if daemonRunning {
+			fmt.Println("🚀 Agent: Running as Daemon")
+			fmt.Println("📊 Network Status: Online - Sending heartbeats")
+			fmt.Println("💡 Agent is actively providing GPU resources")
+		} else if agentRunning {
 			fmt.Println("🚀 Agent: Currently Running")
 			fmt.Println("📊 Network Status: Online - Sending heartbeats")
 			fmt.Println("💡 Agent is actively providing GPU resources")
 		} else {
 			fmt.Println("⏸️  Agent: Not Running")
 			fmt.Println("📊 Network Status: Offline")
-			fmt.Println("💡 Run 'skyops start' to begin providing GPU resources")
+			fmt.Println("💡 Run 'skyops start' or 'skyops start --daemon' to begin providing GPU resources")
 		}
 	} else {
-		savedToken := client.LoadSavedToken()
+		savedToken := globalAPIClient.LoadSavedToken()
 		if savedToken != "" {
 			fmt.Println("⚠️  Status: Configured but Token Invalid")
 			fmt.Println("🔑 Authentication: Token expired/invalid")
-			if agentRunning {
+			if daemonRunning || agentRunning {
 				fmt.Println("⚠️  Agent: Running but authentication failed")
 			}
 			fmt.Println("💡 Run 'skyops register' to re-authenticate")
@@ -898,48 +974,61 @@ func handleStatusCommand(args []string) {
 
 func handleStopCommand(args []string) {
 	fmt.Println("🛑 Stopping SkyOps Agent...")
+
+	// Parse flags
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			fmt.Println(`🛑 SkyOps Stop Command
+
+Usage:
+  skyops stop [flags]
+
+Description:
+  Stop any running SkyOps agent processes
+
+Flags:
+  --help, -h          Show this help message
+
+Examples:
+  skyops stop         # Stop running agent
+  
+This command will:
+  - Try to stop daemon process first
+  - Find running skyops processes
+  - Send graceful shutdown signals
+  - Clean up any leftover processes`)
+			return
+		}
+	}
+
+	// First try to stop daemon if it's running
+	if isDaemonRunning() {
+		fmt.Println("🔧 Stopping daemon process...")
+		if err := stopDaemon(); err != nil {
+			fmt.Printf("⚠️  Failed to stop daemon: %v\n", err)
+			fmt.Println("🔍 Falling back to process search...")
+		} else {
+			return // Daemon stopped successfully
+		}
+	}
+
+	// Find and stop skyops processes
+	stopped := stopSkyOpsProcesses()
 	
-	// TODO: Add logic to gracefully stop running agent
-	// This could involve PID files, signal handling, etc.
-	fmt.Println("✅ Agent stopped")
+	if stopped > 0 {
+		fmt.Printf("✅ Stopped %d SkyOps process(es)\n", stopped)
+	} else {
+		fmt.Println("ℹ️  No running SkyOps processes found")
+	}
 }
 
-// saveConfig saves the current configuration to the config file
-func (a *Agent) saveConfig() error {
-	// Determine config file path
-	homeDir, _ := os.UserHomeDir()
-	configPath := filepath.Join(homeDir, ".skyops", "config.json")
-
-	// Create the directory if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %v", err)
-	}
-
-	// Marshal config to JSON
-	configData, err := json.MarshalIndent(a.config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %v", err)
-	}
-
-	// Write to file
-	if err := os.WriteFile(configPath, configData, 0644); err != nil {
-		return fmt.Errorf("failed to write config file: %v", err)
-	}
-
-	a.logger.WithField("config_path", configPath).Debug("Configuration saved")
-	return nil
-}
-
+// stopSkyOpsProcesses finds and stops running skyops processes
 func handlePingCommand(args []string) {
-	homeDir, _ := os.UserHomeDir()
-	var configPath string = filepath.Join(homeDir, ".skyops", "config.json")
 	var verbose bool = false
 
 	// Parse flags
-	for i, arg := range args {
-		if arg == "--config" && i+1 < len(args) {
-			configPath = args[i+1]
-		} else if arg == "--verbose" || arg == "-v" {
+	for _, arg := range args {
+		if arg == "--verbose" || arg == "-v" {
 			verbose = true
 		} else if arg == "--help" || arg == "-h" {
 			fmt.Println(`📡 SkyOps Ping Command
@@ -951,38 +1040,36 @@ Description:
   Test the heartbeat connection to the SkyOps network
 
 Flags:
-  --config string     Path to configuration file (default: ~/.skyops/config.json)
   --verbose, -v       Show detailed output and logs
   --help, -h          Show this help message
 
 Examples:
   skyops ping         # Test heartbeat with clean output
   skyops ping -v      # Test with verbose output
-  skyops ping --config /path/to/config.json  # Test with custom config`)
+
+Environment Variables:
+  BACKEND_URL         # Required: SkyOps backend URL
+  API_KEY            # Optional: API key for authentication`)
 			return
 		}
 	}
 
-	// Check if config file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		fmt.Println("❌ Configuration file not found. Please run 'skyops register' first.")
+	// Check if required environment variables are set
+	if os.Getenv("BACKEND_URL") == "" {
+		fmt.Println("❌ BACKEND_URL environment variable not set")
+		fmt.Println("Please set required environment variables before running ping")
 		return
 	}
 
-	// Load config and create agent
-	agent, err := NewAgent(configPath)
-	if err != nil {
-		fmt.Printf("❌ Failed to load agent config: %v\n", err)
-		return
-	}
-	// Note: No defer cleanup() for ping command since it's just a test
 
-	// Disable logging output unless verbose mode
-	if !verbose {
-		agent.logger.SetOutput(io.Discard)
-		agent.apiClient.SetLogger(logrus.New())
-		agent.apiClient.logger.SetOutput(io.Discard)
-	}
+
+	// Ensure global API client is initialized
+	// if globalAPIClient == nil {
+	// 	if err := initializeGlobalAPIClient(); err != nil {
+	// 		fmt.Printf("❌ Failed to initialize API client: %v\n", err)
+	// 		return
+	// 	}
+	// }
 
 	if verbose {
 		fmt.Println("🏓 Testing SkyOps Network Connection...")
@@ -993,7 +1080,7 @@ Examples:
 	}
 
 	// Test authentication
-	if !agent.apiClient.ValidateToken() {
+	if !globalAPIClient.ValidateToken() {
 		if verbose {
 			fmt.Println("❌ Authentication failed")
 			fmt.Println("💡 Please run 'skyops register' to authenticate")
@@ -1006,6 +1093,13 @@ Examples:
 	if verbose {
 		fmt.Println("✅ Authentication successful")
 		fmt.Println("📊 Collecting system information...")
+	}
+
+	// Now create full agent for system monitoring
+	agent, err := getOrCreateAgent(verbose)
+	if err != nil {
+		fmt.Printf("❌ Failed to load agent config: %v\n", err)
+		return
 	}
 
 	// Get system stats and format heartbeat
@@ -1046,5 +1140,351 @@ Examples:
 		}
 	} else {
 		fmt.Println("✅ Success!")
+	}
+}
+
+func handleStatsCommand(args []string) {
+	var verbose bool = false
+
+	// Parse flags
+	for _, arg := range args {
+		if arg == "--verbose" || arg == "-v" {
+			verbose = true
+		} else if arg == "--help" || arg == "-h" {
+			fmt.Println(`📊 SkyOps Agent Statistics
+
+Usage:
+  skyops stats [flags]
+
+Description:
+  Display detailed information about the registered agent including system specs,
+  network status, reputation, and earnings.
+
+Flags:
+  --verbose, -v       Show additional technical details
+  --help, -h          Show this help message
+
+
+Examples:
+  skyops stats        # Show basic agent statistics
+  skyops stats -v     # Show detailed statistics with technical info`)
+			return
+		}
+	}
+
+	fmt.Println("📊 SkyOps Node Statistics")
+	fmt.Println(strings.Repeat("=", 50))
+
+
+
+
+	// Ensure global API client is initialized
+	if globalAPIClient == nil {
+		if err := initializeGlobalAPIClient(); err != nil {
+			fmt.Printf("❌ Failed to initialize API client: %v\n", err)
+			return
+		}
+	}
+
+	// Check authentication
+	if !globalAPIClient.ValidateToken() {
+		fmt.Println("❌ Not authenticated")
+		fmt.Println("💡 Run 'skyops login' to authenticate first")
+		return
+	}
+
+	// Get agent information from the server
+	agentExists, err := globalAPIClient.CheckAgentExists()
+	if err != nil {
+		fmt.Printf("❌ Failed to check agent status: %v\n", err)
+		return
+	}
+
+	if !agentExists {
+		fmt.Println("❌ Agent not found on the network")
+		fmt.Println("💡 Run 'skyops register' to register your agent")
+		return
+	}
+
+	// Get detailed agent info using the wallet address
+	walletAddress := globalAPIClient.GetWalletAddress()
+	if walletAddress == "" {
+		// Try to get wallet address from user info
+		if userInfo, err := globalAPIClient.GetUserInfo(); err == nil {
+			if wallet, ok := userInfo["wallet"].(string); ok {
+				walletAddress = wallet
+				globalAPIClient.SetWalletAddress(walletAddress)
+			}
+		}
+	}
+
+	if walletAddress == "" {
+		fmt.Println("❌ Could not retrieve wallet address")
+		return
+	}
+
+	// Get agent details from the backend
+	resp, err := globalAPIClient.makeRequest("GET", fmt.Sprintf("/api/v1/agents/%s", walletAddress), nil)
+	if err != nil {
+		fmt.Printf("❌ Failed to get agent details: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("❌ Failed to get agent details (status %d): %s\n", resp.StatusCode, string(body))
+		return
+	}
+
+	var agentInfo map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&agentInfo); err != nil {
+		fmt.Printf("❌ Failed to parse agent details: %v\n", err)
+		return
+	}
+
+	// Display agent information in a nicely formatted way
+	displayAgentStats(agentInfo, verbose)
+}
+
+func displayAgentStats(agentInfo map[string]interface{}, verbose bool) {
+	// Basic Information
+	fmt.Println("\n🤖 Node Information")
+	fmt.Println(strings.Repeat("-", 30))
+	
+	agentID, _ := agentInfo["agent_id"].(string)
+	var status string
+	if isAgentRunning() {
+		status = "online"
+	} else {
+		status = "offline"
+	}
+	
+	fmt.Printf("Agent ID:     %s\n", agentID)
+	fmt.Printf("Status:       %s\n", getStatusEmoji(status)+status)
+	
+	// Location
+	if location, ok := agentInfo["location"].(string); ok && location != "" {
+		fmt.Printf("Location:     %s\n", location)
+	}
+
+	// Timestamps
+	if createdAt, ok := agentInfo["created_at"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			fmt.Printf("Created:      %s\n", parsed.Format("2006-01-02 15:04:05 UTC"))
+		}
+	}
+	
+	if lastSeen, ok := agentInfo["last_seen"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339, lastSeen); err == nil {
+			duration := time.Since(parsed)
+			fmt.Printf("Last Seen:    %s (%s ago)\n", parsed.Format("2006-01-02 15:04:05 UTC"), formatDuration(duration))
+		}
+	}
+
+	// Reputation and Performance
+	fmt.Println("\n📈 Performance Metrics")
+	fmt.Println(strings.Repeat("-", 30))
+	
+	if reputation, ok := agentInfo["reputation_score"].(float64); ok {
+		fmt.Printf("Reputation:   %.2f/5.0 %s\n", reputation, getReputationEmoji(reputation))
+	}
+	
+	if jobsCompleted, ok := agentInfo["total_jobs_completed"].(float64); ok {
+		fmt.Printf("Jobs Done:    %.0f\n", jobsCompleted)
+	}
+
+	// System Information
+	fmt.Println("\n💻 System Specifications")
+	fmt.Println(strings.Repeat("-", 30))
+	
+	// Check for direct agent-level hardware specs first (new format)
+	if cpuCount, ok := agentInfo["cpu_count"].(float64); ok && cpuCount > 0 {
+		fmt.Printf("CPU Cores:    %.0f\n", cpuCount)
+	} else if systemInfo, ok := agentInfo["system_info"].(map[string]interface{}); ok {
+		if cpuCount, ok := systemInfo["cpu_count"].(float64); ok {
+			fmt.Printf("CPU Cores:    %.0f\n", cpuCount)
+		}
+	}
+	
+	if ramTotal, ok := agentInfo["ram_total"].(float64); ok && ramTotal > 0 {
+		fmt.Printf("Total RAM:    %.1f GB\n", ramTotal)
+		if ramFree, ok := agentInfo["ram_free"].(float64); ok {
+			ramUsed := ramTotal - ramFree
+			usagePercent := (ramUsed / ramTotal) * 100
+			fmt.Printf("RAM Used:     %.1f GB (%.1f%%)\n", ramUsed, usagePercent)
+			fmt.Printf("RAM Free:     %.1f GB\n", ramFree)
+		}
+	} else if systemInfo, ok := agentInfo["system_info"].(map[string]interface{}); ok {
+		if memTotal, ok := systemInfo["memory_total"].(float64); ok {
+			fmt.Printf("Total RAM:    %.1f GB\n", memTotal)
+		}
+	}
+	
+	if diskTotal, ok := agentInfo["disk_total"].(float64); ok && diskTotal > 0 {
+		fmt.Printf("Total Disk:   %.0f GB\n", diskTotal)
+		if diskFree, ok := agentInfo["disk_free"].(float64); ok {
+			diskUsed := diskTotal - diskFree
+			usagePercent := (diskUsed / diskTotal) * 100
+			fmt.Printf("Disk Used:    %.0f GB (%.1f%%)\n", diskUsed, usagePercent)
+			fmt.Printf("Disk Free:    %.0f GB\n", diskFree)
+		}
+	} else if systemInfo, ok := agentInfo["system_info"].(map[string]interface{}); ok {
+		if diskTotal, ok := systemInfo["disk_total"].(float64); ok {
+			fmt.Printf("Total Disk:   %.0f GB\n", diskTotal)
+		}
+	}
+
+	// GPU Information - check agent level first, then system_info
+	if gpuName, ok := agentInfo["gpu_name"].(string); ok && gpuName != "" {
+		fmt.Println("\n🎮 GPU Information")
+		fmt.Println(strings.Repeat("-", 30))
+		fmt.Printf("GPU Model:    %s\n", gpuName)
+		
+		if gpuRamTotal, ok := agentInfo["gpu_ram_total"].(float64); ok && gpuRamTotal > 0 {
+			fmt.Printf("GPU Memory:   %.1f GB\n", gpuRamTotal)
+			if gpuRamFree, ok := agentInfo["gpu_ram_free"].(float64); ok {
+				gpuRamUsed := gpuRamTotal - gpuRamFree
+				usagePercent := (gpuRamUsed / gpuRamTotal) * 100
+				fmt.Printf("GPU Used:     %.1f GB (%.1f%%)\n", gpuRamUsed, usagePercent)
+				fmt.Printf("GPU Free:     %.1f GB\n", gpuRamFree)
+			}
+		}
+	}
+	
+
+
+	// Pricing Information
+	if pricing, ok := agentInfo["pricing"].(map[string]interface{}); ok && len(pricing) > 0 {
+		fmt.Println("\n💰 Pricing")
+		fmt.Println(strings.Repeat("-", 30))
+		
+		for resource, price := range pricing {
+			if priceVal, ok := price.(float64); ok {
+				resourceName := strings.ToUpper(string(resource[0])) + resource[1:]
+				fmt.Printf("%-12s: $%.4f/hour\n", resourceName, priceVal)
+			}
+		}
+	}
+
+	// Tags
+	if tags, ok := agentInfo["tags"].([]interface{}); ok && len(tags) > 0 {
+		fmt.Println("\n🏷️  Tags")
+		fmt.Println(strings.Repeat("-", 30))
+		for _, tag := range tags {
+			if tagStr, ok := tag.(string); ok {
+				fmt.Printf("• %s\n", tagStr)
+			}
+		}
+	}
+
+	// Verbose information
+	if verbose {
+		fmt.Println("\n🔧 Technical Details")
+		fmt.Println(strings.Repeat("-", 30))
+		
+		// Show agent-level hardware details first
+		if ramTotal, ok := agentInfo["ram_total"].(float64); ok && ramTotal > 0 {
+			// Calculate RAM usage if we have the total from agent level
+			fmt.Printf("RAM Total:    %.1f GB\n", ramTotal)
+			
+			// Try to get current usage from system_info if available
+			if systemInfo, ok := agentInfo["system_info"].(map[string]interface{}); ok {
+				if memUsed, ok := systemInfo["memory_used"].(float64); ok {
+					fmt.Printf("RAM Used:     %.1f GB\n", memUsed)
+				}
+				if memAvail, ok := systemInfo["memory_available"].(float64); ok {
+					fmt.Printf("RAM Free:     %.1f GB\n", memAvail)
+				}
+			}
+		}
+		
+		// Show disk details
+		if diskTotal, ok := agentInfo["disk_total"].(float64); ok && diskTotal > 0 {
+			if diskFree, ok := agentInfo["disk_free"].(float64); ok {
+				diskUsed := diskTotal - diskFree
+				fmt.Printf("Disk Used:    %.0f GB\n", diskUsed)
+				fmt.Printf("Disk Free:    %.0f GB\n", diskFree)
+			}
+		}
+		
+		// Show GPU memory details
+		if gpuRamTotal, ok := agentInfo["gpu_ram_total"].(float64); ok && gpuRamTotal > 0 {
+			if gpuRamFree, ok := agentInfo["gpu_ram_free"].(float64); ok {
+				gpuRamUsed := gpuRamTotal - gpuRamFree
+				fmt.Printf("GPU RAM Used: %.1f GB\n", gpuRamUsed)
+				fmt.Printf("GPU RAM Free: %.1f GB\n", gpuRamFree)
+			}
+		}
+		
+		// Fallback to system_info for additional details
+		if systemInfo, ok := agentInfo["system_info"].(map[string]interface{}); ok {
+			if cpuUsage, ok := systemInfo["cpu_usage"].(float64); ok {
+				fmt.Printf("CPU Usage:    %.1f%%\n", cpuUsage)
+			}
+			
+			// Only show these if we don't have agent-level equivalents
+			if _, hasAgentRAM := agentInfo["ram_total"]; !hasAgentRAM {
+				if memUsed, ok := systemInfo["memory_used"].(float64); ok {
+					fmt.Printf("RAM Used:     %.1f GB\n", memUsed)
+				}
+				
+				if memAvail, ok := systemInfo["memory_available"].(float64); ok {
+					fmt.Printf("RAM Free:     %.1f GB\n", memAvail)
+				}
+			}
+			
+			if _, hasAgentDisk := agentInfo["disk_total"]; !hasAgentDisk {
+				if diskUsed, ok := systemInfo["disk_used"].(float64); ok {
+					fmt.Printf("Disk Used:    %.0f GB\n", diskUsed)
+				}
+				
+				if diskFree, ok := systemInfo["disk_free"].(float64); ok {
+					fmt.Printf("Disk Free:    %.0f GB\n", diskFree)
+				}
+			}
+		}
+	}
+
+	fmt.Println("\n" + strings.Repeat("=", 50))
+}
+
+func getStatusEmoji(status string) string {
+	switch strings.ToLower(status) {
+	case "online":
+		return "🟢 "
+	case "offline":
+		return "🔴 "
+	case "busy":
+		return "🟡 "
+	default:
+		return "⚪ "
+	}
+}
+
+func getReputationEmoji(score float64) string {
+	if score >= 4.5 {
+		return "⭐⭐⭐⭐⭐"
+	} else if score >= 3.5 {
+		return "⭐⭐⭐⭐"
+	} else if score >= 2.5 {
+		return "⭐⭐⭐"
+	} else if score >= 1.5 {
+		return "⭐⭐"
+	} else if score >= 0.5 {
+		return "⭐"
+	}
+	return "☆"
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	} else if d < time.Hour {
+		return fmt.Sprintf("%.0fm", d.Minutes())
+	} else if d < 24*time.Hour {
+		return fmt.Sprintf("%.1fh", d.Hours())
+	} else {
+		return fmt.Sprintf("%.1fd", d.Hours()/24)
 	}
 }
