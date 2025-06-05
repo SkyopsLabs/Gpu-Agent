@@ -1,0 +1,45 @@
+#!/bin/bash
+set -e
+
+# Function to cleanup skyops for a user
+cleanup_skyops_for_user() {
+    local username="$1"
+    local user_home="$2"
+    
+    if [ -d "$user_home/.skyops" ]; then
+        echo "Removing SkyOps installation for user: $username"
+        
+        # Remove the .skyops directory
+        sudo -u "$username" rm -rf "$user_home/.skyops" 2>/dev/null || rm -rf "$user_home/.skyops"
+        
+        # Remove PATH entries from shell profiles
+        for shell_rc in "$user_home/.bashrc" "$user_home/.zshrc" "$user_home/.profile"; do
+            if [ -f "$shell_rc" ]; then
+                # Remove the skyops PATH lines
+                sed -i '/# Added by SkyOps package/,+1d' "$shell_rc" 2>/dev/null || true
+                sed -i '/\.skyops.*PATH/d' "$shell_rc" 2>/dev/null || true
+            fi
+        done
+    fi
+}
+
+if [ "$1" = "remove" ]; then
+    # Try to get the real user who invoked sudo
+    REAL_USER="${SUDO_USER:-}"
+    
+    if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
+        REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+        cleanup_skyops_for_user "$REAL_USER" "$REAL_HOME"
+    else
+        # Cleanup for all users
+        getent passwd | while IFS: read -r username _ uid _ _ home_dir _; do
+            if [ "$uid" -ge 1000 ] && [ "$uid" -le 60000 ]; then
+                cleanup_skyops_for_user "$username" "$home_dir" || true
+            fi
+        done
+    fi
+    
+    echo "SkyOps agent removed from user directories."
+fi
+
+#DEBHELPER#

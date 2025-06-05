@@ -40,9 +40,7 @@ for platform in "${PLATFORMS[@]}"; do
     env GOOS=$GOOS GOARCH=$GOARCH go build \
         -ldflags="-s -w -X main.Version=${VERSION}" \
         -o ${output_path} .
-    
-    # Copy config file
-    cp config.json "$(dirname ${output_path})/"
+
     
     # Create archive
     cd ${BUILD_DIR}

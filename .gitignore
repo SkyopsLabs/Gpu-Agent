@@ -1,4 +1,32 @@
+# Build artifacts
 skyops
 build/
+releases/*.deb
+releases/*.msi
+skyops-cli-repo
+releases
+
+
+# Environment files
 .env
-.vscode
+
+# IDE files
+.vscode/
+
+# Debian packaging artifacts
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.substvars
+debian/skyops/
+
+# Windows MSI build artifacts
+windows/*.wixobj
+windows/*.wixpdb
+build/windows/
+
+# Debian build files (in parent directory)
+../*.deb
+../*.changes
+../*.buildinfo
+../*.ddeb

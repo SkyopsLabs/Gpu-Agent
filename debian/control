@@ -1,0 +1,17 @@
+Source: skyops
+Section: utils
+Priority: optional
+Maintainer: SkyOps Team <support@skyopslabs.ai>
+Build-Depends: debhelper (>= 12), golang-go (>= 1.21)
+Standards-Version: 4.5.1
+Homepage: https://skyopslabs.ai
+
+Package: skyops
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: SkyOps Node - GPU monitoring and management tool
+ SkyOps Node is a command-line tool for monitoring and managing GPU resources.
+ It provides real-time monitoring, system information collection, and integration
+ with the SkyOps platform for cloud GPU management.
+ .
+ The node software automatically installs to ~/.skyops and adds itself to the system PATH.

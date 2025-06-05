@@ -686,7 +686,20 @@ func main() {
 }
 
 func showHelp() {
-	fmt.Println(`SkyOps GPU Provider - Join the decentralized GPU network
+	fmt.Println(`
+		/$$                                              
+		| $$                                              
+/$$$$$$$| $$   /$$ /$$   /$$  /$$$$$$   /$$$$$$   /$$$$$$$
+/$$_____/| $$  /$$/| $$  | $$ /$$__  $$ /$$__  $$ /$$_____/
+|  $$$$$$ | $$$$$$/ | $$  | $$| $$  \ $$| $$  \ $$|  $$$$$$ 
+\____  $$| $$_  $$ | $$  | $$| $$  | $$| $$  | $$ \____  $$
+/$$$$$$$/| $$ \  $$|  $$$$$$$|  $$$$$$/| $$$$$$$/ /$$$$$$$/
+|_______/ |__/  \__/ \____  $$ \______/ | $$____/ |_______/ 
+					/$$  | $$          | $$                
+					|  $$$$$$/          | $$                
+					\______/           |__/                
+
+SkyOps GPU Provider - Join the decentralized GPU network
 
 Usage:
   skyops [command] [flags]

@@ -1,0 +1,34 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	go build -o skyops .
+
+override_dh_auto_install:
+	# Create directories
+	mkdir -p debian/skyops/usr/bin
+	mkdir -p debian/skyops/etc/profile.d
+	mkdir -p debian/skyops/etc/bash_completion.d
+	
+	# Install binary
+	cp skyops debian/skyops/usr/bin/
+	
+	# Create profile script to add ~/.skyops to PATH for all shells
+	echo '#!/bin/sh' > debian/skyops/etc/profile.d/skyops.sh
+	echo '# Add ~/.skyops to PATH if it exists' >> debian/skyops/etc/profile.d/skyops.sh
+	echo 'if [ -d "$$HOME/.skyops" ]; then' >> debian/skyops/etc/profile.d/skyops.sh
+	echo '    case ":$$PATH:" in' >> debian/skyops/etc/profile.d/skyops.sh
+	echo '        *":$$HOME/.skyops:"*) ;;' >> debian/skyops/etc/profile.d/skyops.sh
+	echo '        *) export PATH="$$HOME/.skyops:$$PATH" ;;' >> debian/skyops/etc/profile.d/skyops.sh
+	echo '    esac' >> debian/skyops/etc/profile.d/skyops.sh
+	echo 'fi' >> debian/skyops/etc/profile.d/skyops.sh
+	chmod +x debian/skyops/etc/profile.d/skyops.sh
+
+override_dh_auto_clean:
+	rm -f skyops
+	rm -rf build/
+
+# Disable dwz compression for Go binaries
+override_dh_dwz:

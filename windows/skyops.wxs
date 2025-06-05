@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" 
+           Name="SkyOps CLI" 
+           Language="1033" 
+           Version="1.0.0" 
+           Manufacturer="SkyOps Labs" 
+           UpgradeCode="12345678-1234-1234-1234-123456789012">
+    
+    <Package InstallerVersion="200" 
+             Compressed="yes" 
+             InstallScope="perMachine" 
+             Description="SkyOps CLI - GPU monitoring and job management agent"
+             Comments="SkyOps CLI installer" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Installation directory structure -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="SkyOps">
+          <Component Id="MainExecutable" Guid="87654321-4321-4321-4321-210987654321">
+            <File Id="SkyOpsEXE" 
+                  Source="skyops.exe" 
+                  KeyPath="yes" />
+          </Component>
+          
+          <!-- PATH helper script -->
+          <Component Id="PathHelper" Guid="77777777-8888-9999-0000-111111111111">
+            <File Id="AddToPathBAT" 
+                  Source="add-to-path.bat" 
+                  KeyPath="yes" />
+          </Component>
+          
+          <!-- Configuration directory component -->
+          <Component Id="ConfigDir" Guid="11111111-2222-3333-4444-555555555555">
+            <CreateFolder />
+          </Component>
+        </Directory>
+      </Directory>
+      
+      <!-- Start Menu shortcuts -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="SkyOps">
+          <Component Id="ApplicationShortcut" Guid="99999999-8888-7777-6666-555555555555">
+            <Shortcut Id="ApplicationStartMenuShortcut"
+                      Name="SkyOps CLI"
+                      Description="SkyOps GPU monitoring and job management"
+                      Target="[#SkyOpsEXE]"
+                      WorkingDirectory="INSTALLFOLDER" />
+            
+            <Shortcut Id="UninstallProduct"
+                      Name="Uninstall SkyOps CLI"
+                      Target="[System64Folder]msiexec.exe"
+                      Arguments="/x [ProductCode]"
+                      Description="Uninstalls SkyOps CLI" />
+            
+            <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+            <RegistryValue Root="HKCU" 
+                           Key="Software\SkyOps\SkyOpsCLI" 
+                           Name="installed" 
+                           Type="integer" 
+                           Value="1" 
+                           KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <!-- Features -->
+    <Feature Id="ProductFeature" Title="SkyOps CLI" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="PathHelper" />
+      <ComponentRef Id="ConfigDir" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+
+    <!-- Basic UI -->
+    <!-- <UIRef Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" /> -->
+    
+    <!-- Custom actions for post-install -->
+    <!-- <CustomAction Id="CreateConfigDir" 
+                  Directory="INSTALLFOLDER" 
+                  ExeCommand="cmd.exe /c mkdir &quot;%USERPROFILE%\.skyops&quot; 2&gt;nul"
+                  Execute="deferred"
+                  Impersonate="yes" />
+    
+    <InstallExecuteSequence>
+      <Custom Action="CreateConfigDir" After="InstallFiles">NOT Installed</Custom>
+    </InstallExecuteSequence> -->
+  </Product>
+</Wix>

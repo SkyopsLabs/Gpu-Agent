@@ -1,0 +1,62 @@
+skyops (1.0.0-1) stable; urgency=medium
+
+  * Version 1.0.0 release
+  * Updated command-line interface and features
+  * Enhanced GPU monitoring capabilities
+  * Improved system integration and packaging
+
+ -- SkyOps Team <support@skyopslabs.ai>  Thu, 05 Jun 2025 16:09:33 +0100
+
+skyops (1.0.3-1) stable; urgency=medium
+
+  * Version 1.0.3 release
+  * Updated command-line interface and features
+  * Enhanced GPU monitoring capabilities
+  * Improved system integration and packaging
+
+ -- SkyOps Team <support@skyopslabs.ai>  Thu, 05 Jun 2025 16:05:07 +0100
+
+skyops (1.0.3-1) stable; urgency=medium
+
+  * Version 1.0.3 release
+  * Updated command-line interface and features
+  * Enhanced GPU monitoring capabilities
+  * Improved system integration and packaging
+
+ -- SkyOps Team <support@skyopslabs.ai>  Thu, 05 Jun 2025 16:04:45 +0100
+
+skyops (1.0.0-1) stable; urgency=medium
+
+  * Version 1.0.0 release
+  * Updated command-line interface and features
+  * Enhanced GPU monitoring capabilities
+  * Improved system integration and packaging
+
+ -- SkyOps Team <support@skyopslabs.ai>  Thu, 05 Jun 2025 15:42:07 +0100
+
+skyops (1.0.2-1) stable; urgency=medium
+
+  * Version 1.0.2 release
+  * Updated command-line interface and features
+  * Enhanced GPU monitoring capabilities
+  * Improved system integration and packaging
+
+ -- SkyOps Team <support@skyopslabs.ai>  Thu, 05 Jun 2025 15:41:32 +0100
+
+skyops (1.0.1-1) stable; urgency=medium
+
+  * Version 1.0.1 release
+  * Updated command-line interface and features
+  * Enhanced GPU monitoring capabilities
+  * Improved system integration and packaging
+
+ -- SkyOps Team <support@skyopslabs.ai>  Thu, 05 Jun 2025 15:39:00 +0100
+
+skyops (1.0.0-1) stable; urgency=low
+
+  * Initial release of SkyOps Agent
+  * GPU monitoring and management capabilities
+  * Automatic installation to ~/.skyops directory
+  * PATH integration for easy CLI access
+
+ -- SkyOps Team <support@skyopslabs.ai>  Thu, 05 Jun 2025 10:00:00 +0000

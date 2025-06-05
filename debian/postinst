@@ -1,0 +1,61 @@
+#!/bin/bash
+set -e
+
+# Function to setup skyops for a user
+setup_skyops_for_user() {
+    local username="$1"
+    local user_home="$2"
+    
+    if [ -d "$user_home" ] && [ "$username" != "root" ]; then
+        echo "Setting up SkyOps for user: $username"
+        
+        # Create .skyops directory
+        sudo -u "$username" mkdir -p "$user_home/.skyops"
+        
+        # Copy the binary to user's .skyops directory
+        sudo -u "$username" cp /usr/bin/skyops "$user_home/.skyops/"
+        
+        # Make it executable
+        chmod +x "$user_home/.skyops/skyops"
+        
+        # Add to user's shell profile files if they don't already have the PATH
+        for shell_rc in "$user_home/.bashrc" "$user_home/.zshrc" "$user_home/.profile"; do
+            if [ -f "$shell_rc" ] && ! grep -q "\.skyops" "$shell_rc"; then
+                echo "" >> "$shell_rc"
+                echo "# Added by SkyOps package" >> "$shell_rc"
+                echo 'export PATH="$HOME/.skyops:$PATH"' >> "$shell_rc"
+                chown "$username:$(id -gn "$username")" "$shell_rc"
+            fi
+        done
+        
+        echo "SkyOps agent installed to $user_home/.skyops/"
+        return 0
+    fi
+    return 1
+}
+
+if [ "$1" = "configure" ]; then
+    # Try to get the real user who invoked sudo
+    REAL_USER="${SUDO_USER:-}"
+    
+    if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
+        REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+        setup_skyops_for_user "$REAL_USER" "$REAL_HOME"
+    else
+        # If no sudo user, try to setup for all non-system users
+        echo "Setting up SkyOps for all users with home directories..."
+        getent passwd | while IFS: read -r username _ uid _ _ home_dir _; do
+            if [ "$uid" -ge 1000 ] && [ "$uid" -le 60000 ]; then
+                setup_skyops_for_user "$username" "$home_dir" || true
+            fi
+        done
+    fi
+    
+    echo ""
+    echo "SkyOps installation complete!"
+    echo "To start using skyops immediately, run: source /etc/profile.d/skyops.sh"
+    echo "Or restart your shell session."
+    echo ""
+fi
+
+#DEBHELPER#
