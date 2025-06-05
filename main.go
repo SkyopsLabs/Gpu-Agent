@@ -409,7 +409,6 @@ func (a *Agent) formatHeartbeatPayload(stats AgentMonitoringData) map[string]int
 		"agent_id":       a.config.AgentID,
 		"timestamp":      stats.Timestamp,
 		"cpu_count":      stats.SystemInfo.CPUCount,
-		"cpu_total":      100.0,
 		"ram_total":      0.0,
 		"disk_total":     0,
 		"disk_free":      0,
@@ -1083,7 +1082,7 @@ Environment Variables:
 	if !globalAPIClient.ValidateToken() {
 		if verbose {
 			fmt.Println("❌ Authentication failed")
-			fmt.Println("💡 Please run 'skyops register' to authenticate")
+			fmt.Println("💡 Please run 'skyops login' to authenticate")
 		} else {
 			fmt.Println("❌ Authentication failed. Run 'skyops register' first.")
 		}
