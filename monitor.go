@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -15,11 +16,14 @@ import (
 
 // SystemMonitor handles system and GPU monitoring
 type SystemMonitor struct {
+	nvidiaSmiAvailable *bool // Cache nvidia-smi availability
 }
 
 // NewSystemMonitor creates a new system monitor
 func NewSystemMonitor() *SystemMonitor {
-	return &SystemMonitor{}
+	return &SystemMonitor{
+		nvidiaSmiAvailable: nil, // Will be determined on first GPU stats call
+	}
 }
 
 // GetSystemInfo returns basic system information
@@ -41,8 +45,8 @@ func (m *SystemMonitor) GetSystemInfo() SystemInfo {
 
 // GetCPUStats returns CPU statistics
 func (m *SystemMonitor) GetCPUStats() CPUStats {
-	// Get CPU percentage over 1 second
-	percentages, _ := cpu.Percent(time.Second, false)
+	// Get CPU percentage over 100ms instead of 1 second for faster response
+	percentages, _ := cpu.Percent(100*time.Millisecond, false)
 
 	// Get CPU info
 	cpuInfo, _ := cpu.Info()
@@ -101,16 +105,30 @@ func (m *SystemMonitor) GetDiskStats() DiskStats {
 
 // GetGPUStats returns GPU statistics
 func (m *SystemMonitor) GetGPUStats() []GPUInfo {
-	// Try to detect NVIDIA GPUs using nvidia-smi
-	gpus := []GPUInfo{}
+	// Check if nvidia-smi is available (cache the result)
+	if m.nvidiaSmiAvailable == nil {
+		available := false
+		if _, err := exec.LookPath("nvidia-smi"); err == nil {
+			available = true
+		}
+		m.nvidiaSmiAvailable = &available
+	}
+	
+	if !*m.nvidiaSmiAvailable {
+		return []GPUInfo{} // Return empty slice if nvidia-smi not available
+	}
 
+	// Try to detect NVIDIA GPUs using nvidia-smi
 	cmd := exec.Command("nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,fan.speed", "--format=csv,noheader,nounits")
+	cmd.Env = os.Environ() // Inherit environment
 	output, err := cmd.Output()
 	if err != nil {
-		return gpus
+		return []GPUInfo{} // Return empty slice on error
 	}
 
 	lines := strings.Split(string(output), "\n")
+	// Pre-allocate slice with expected capacity to avoid reallocations
+	gpus := make([]GPUInfo, 0, len(lines))
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue

@@ -31,13 +31,25 @@ type APIClient struct {
 
 // NewAPIClient creates a new API client
 func NewAPIClient(baseURL string) *APIClient {
+	// Create a custom transport with optimized settings
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,  // Reduced from default 30s
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     30 * time.Second,
+	}
+
 	return &APIClient{
 		baseURL:          strings.TrimSuffix(baseURL, "/"),
 		logger:           logrus.New(),
 		expressServerURL: "https://app.skyopslabs.ai",
 		clientURL:        "https://app.skyopslabs.ai",
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   15 * time.Second, // Reduced from 30s
+			Transport: transport,
 		},
 	}
 }
@@ -534,4 +546,15 @@ func (c *APIClient) GetAuthToken() string {
 // SetAuthToken sets the authentication token
 func (c *APIClient) SetAuthToken(token string) {
 	c.authToken = token
+}
+
+// HasSavedToken quickly checks if a token exists locally without network validation
+func (c *APIClient) HasSavedToken() bool {
+	tokenPath := c.getTokenFilePath()
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		return false
+	}
+	token := strings.TrimSpace(string(data))
+	return token != ""
 }

@@ -642,15 +642,27 @@ func getOrLoadConfig() (*Config, error) {
 	return globalConfig, nil
 }
 
+// loadMinimalConfig loads only essential config for lightweight commands
+func loadMinimalConfig() (*Config, error) {
+	config := &Config{}
+	
+	// Only load essential environment variables
+	config.BackendURL = os.Getenv("BACKEND_URL")
+	if config.BackendURL == "" {
+		config.BackendURL = "https://app.skyopslabs.ai" // Default value
+	}
+	
+	config.Logging.Level = os.Getenv("LOG_LEVEL")
+	if config.Logging.Level == "" {
+		config.Logging.Level = "error" // Minimal logging for fast commands
+	}
+	
+	return config, nil
+}
+
 // Note: No cleanup function needed as it would reset agent stats in database
 
 func main() {
-	// Initialize global API client
-	if err := initializeGlobalAPIClient(); err != nil {
-		// For commands that don't need API access, we can continue
-		// Commands that need API will handle the error gracefully
-	}
-
 	if len(os.Args) < 2 {
 		showHelp()
 		os.Exit(0)
@@ -659,9 +671,49 @@ func main() {
 	command := os.Args[1]
 	args := os.Args[2:]
 
+	// Fast path for simple commands - no initialization at all
+	switch command {
+	case "help", "--help", "-h":
+		showHelp()
+		return
+	case "version", "--version", "-v":
+		fmt.Println("SkyOps GPU Agent v1.0.0")
+		return
+	case "login":
+		// Ultra-fast token check without any initialization
+		homeDir, _ := os.UserHomeDir()
+		tokenPath := filepath.Join(homeDir, ".skyops", "token")
+		if data, err := os.ReadFile(tokenPath); err == nil {
+			token := strings.TrimSpace(string(data))
+			if token != "" {
+				fmt.Println("✅ Already logged in!")
+				return
+			}
+		}
+		// Fall through to full login flow
+	}
+
+	// Only initialize API client for commands that need it
+	needsAPI := map[string]bool{
+		"login":    true,
+		"register": true,
+		"start":    true,
+		"status":   true,
+		"stats":    true,
+		"stop":     true,
+		"ping":     true,
+	}
+
+	if needsAPI[command] {
+		if err := initializeGlobalAPIClient(); err != nil {
+			// For commands that don't need API access, we can continue
+			// Commands that need API will handle the error gracefully
+		}
+	}
+
 	switch command {
 	case "login":
-		handleLoginCommand()
+		handleLoginCommandFullFlow()
 	case "register":
 		handleRegisterCommand(args)
 	case "start":
@@ -674,10 +726,6 @@ func main() {
 		handleStopCommand(args)
 	case "ping":
 		handlePingCommand(args)
-	case "version", "--version", "-v":
-		fmt.Println("SkyOps GPU Agent v1.0.0")
-	case "help", "--help", "-h":
-		showHelp()
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		showHelp()
@@ -736,9 +784,22 @@ Daemon Mode:
   Use 'skyops status' to check if the daemon is running.`)
 }
 
-func handleLoginCommand() {
-	// Ensure global API client is initialized with current config
-	// printf("client: %v\n", globalAPIClient)
+func handleLoginCommandFullFlow() {
+	// Ultra-fast check: just check if token file exists, no initialization at all
+	homeDir, _ := os.UserHomeDir()
+	tokenPath := filepath.Join(homeDir, ".skyops", "token")
+	if data, err := os.ReadFile(tokenPath); err == nil {
+		token := strings.TrimSpace(string(data))
+		if token != "" {
+			fmt.Println("✅ Already logged in!")
+			return
+		}
+	}
+
+	// Only proceed with full authentication flow if no token exists
+	fmt.Println("🔐 Starting authentication flow...")
+	
+	// Now do full initialization
 	if globalAPIClient == nil {
 		if err := initializeGlobalAPIClient(); err != nil {
 			fmt.Printf("❌ Failed to initialize API client: %v\n", err)
@@ -746,28 +807,20 @@ func handleLoginCommand() {
 		}
 	}
 
-	// If wallet address is missing, force authentication
-	if globalAPIClient.wallet == "" {
-		fmt.Println("🔐 Wallet address not found, starting authentication flow...")
-		if err := globalAPIClient.Authenticate(); err != nil {
-			fmt.Println("❌ Authentication failed")
-			os.Exit(1)
-		}
-		// Get and store wallet address after successful authentication
-		if userInfo, err := globalAPIClient.GetUserInfo(); err == nil {
-			if walletAddress, ok := userInfo["wallet"].(string); ok {
-				globalAPIClient.SetWalletAddress(walletAddress)
-			}
-		}
-		fmt.Println("✅ Authentication successful!")
-		return
+	// Authentication logic
+	if err := globalAPIClient.Authenticate(); err != nil {
+		fmt.Println("❌ Authentication failed")
+		os.Exit(1)
 	}
-
-	// Check if already logged in
-	if globalAPIClient.ValidateToken() {
-		fmt.Println("✅ Already logged in!")
-		return
+	
+	// Get and store wallet address after successful authentication
+	if userInfo, err := globalAPIClient.GetUserInfo(); err == nil {
+		if walletAddress, ok := userInfo["wallet"].(string); ok {
+			globalAPIClient.SetWalletAddress(walletAddress)
+		}
 	}
+	
+	fmt.Println("✅ Authentication successful!")
 
 	fmt.Println("🔐 Starting SkyOps authentication flow...")
 	if err := globalAPIClient.Authenticate(); err != nil {
