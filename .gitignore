@@ -8,10 +8,8 @@ releases
 
 
 # Environment files
-.env
 
 # IDE files
-.vscode/
 
 # Debian packaging artifacts
 debian/.debhelper/
@@ -30,3 +28,11 @@ build/windows/
 ../*.changes
 ../*.buildinfo
 ../*.ddeb
+
+venv
+.devcontainer
+logs
+__pycache__
+docker-templates
+config.bat
+node_modules

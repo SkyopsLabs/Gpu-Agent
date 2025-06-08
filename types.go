@@ -26,13 +26,16 @@ const (
 	AvailabilityMaintenance AgentAvailability = "maintenance"
 )
 
-// Location represents geographic location information
+// Location represents geographic location information from ipinfo.io
 type Location struct {
-	Country   string   `json:"country"`
-	Region    string   `json:"region"`
-	City      string   `json:"city"`
-	Latitude  *float64 `json:"latitude,omitempty"`
-	Longitude *float64 `json:"longitude,omitempty"`
+	IP       string `json:"ip"`
+	City     string `json:"city"`
+	Region   string `json:"region"`
+	Country  string `json:"country"`
+	Loc      string `json:"loc"`      // "latitude,longitude"
+	Org      string `json:"org"`      // Organization/ISP
+	Postal   string `json:"postal"`   // Postal code
+	Timezone string `json:"timezone"` // Timezone
 }
 
 // SystemInfo represents system information from monitoring
@@ -137,7 +140,7 @@ type AgentMetrics struct {
 type AgentRegisterRequest struct {
 	AgentID         *string          `json:"agent_id,omitempty"`
 	Hostname        string           `json:"hostname"`
-	Location        string           `json:"location"`
+	Location        interface{}      `json:"location"` // Can be string (legacy) or object (new format)
 	SystemInfo      SystemInfo       `json:"system_info"`
 	// GPUCapabilities GPUCapabilities  `json:"gpu_capabilities"`
 	AutoAcceptJobs  *bool            `json:"auto_accept_jobs,omitempty"`
@@ -199,7 +202,7 @@ type AgentInfo struct {
 	IsOnline        bool             `json:"is_online"`
 	LastSeen        time.Time        `json:"last_seen"`
 	CreatedAt       time.Time        `json:"created_at"`
-	Location        Location         `json:"location"`
+	Location        interface{}      `json:"location"` // Can be Location object or string for backward compatibility
 	SystemInfo      SystemInfo       `json:"system_info"`
 	GPUCapabilities GPUCapabilities  `json:"gpu_capabilities"`
 	Pricing         AgentPricing     `json:"pricing"`
@@ -211,7 +214,7 @@ type AgentInfo struct {
 type PublicAgent struct {
 	ID           string            `json:"id"`
 	Provider     string            `json:"provider"`
-	Location     string            `json:"location"`
+	Location     interface{}       `json:"location"` // Can be formatted string or Location object
 	GPUModel     string            `json:"gpu_model"`
 	VramGB       int               `json:"vram_gb"`
 	Cores        int               `json:"cores"`

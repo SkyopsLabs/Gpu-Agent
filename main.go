@@ -356,16 +356,47 @@ func (a *Agent) detectLocation() (string, error) {
 	}
 
 	var data struct {
-		City    string `json:"city"`
-		Region  string `json:"region"`
-		Country string `json:"country"`
+		IP       string `json:"ip"`
+		City     string `json:"city"`
+		Region   string `json:"region"`
+		Country  string `json:"country"`
+		Loc      string `json:"loc"`
+		Org      string `json:"org"`
+		Timezone string `json:"timezone"`
+		Readme   string `json:"readme"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf("%s, %s, %s", data.City, data.Region, data.Country), nil
+	// Return the full object as JSON string
+	fullLocation := struct {
+		IP       string `json:"ip"`
+		City     string `json:"city"`
+		Region   string `json:"region"`
+		Country  string `json:"country"`
+		Loc      string `json:"loc"`
+		Org      string `json:"org"`
+		Timezone string `json:"timezone"`
+		Readme   string `json:"readme"`
+	}{
+		IP:       data.IP,
+		City:     data.City,
+		Region:   data.Region,
+		Country:  data.Country,
+		Loc:      data.Loc,
+		Org:      data.Org,
+		Timezone: data.Timezone,
+		Readme:   data.Readme,
+	}
+
+	locationJSON, err := json.Marshal(fullLocation)
+	if err != nil {
+		return "", err
+	}
+
+	return string(locationJSON), nil
 }
 
 // sendHeartbeat sends a heartbeat with current system status
